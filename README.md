@@ -16,7 +16,7 @@ Since Security and Privacy audits have no place in Iran, and `Shecan` obviously 
 
 # How to Use
 
-- make sure ports 80, 443 and 53 are not used in your system (probably a good idea to disable `systemd-resolvd` service)
+- make sure ports 80, 443 and 53 are not used in your system (disable `systemd-resolved` first: `systemctl disable --now systemd-resolved`)
 - run the command in your server (remember to replace YOUR_PUBLIC_IP with you public facing IP address)
 
 `docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP --name some-byosh mosajjal/byosh:latest`
@@ -47,6 +47,28 @@ run the following command (not tested):
 `docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP -e DNS_ALLOW_ALL=YES --name some-byosh mosajjal/byosh:latest`
 
 NOTE: you still have to provide a list file, albiet an empty one. It'll get ignored once the service is started
+
+## How to verify the setup
+
+After the container starts, test DNS resolution from a client configured to use the server's IP as its DNS server:
+
+```bash
+# A proxied domain should resolve to your server's IP
+dig +short github.com @<SERVER_IP>
+
+# A non-whitelisted domain should resolve to its real IP
+dig +short example.com @<SERVER_IP>
+```
+
+HTTPS traffic to proxied domains will be transparently proxied through the server's nginx via SNI routing.
+
+## Security and safety notes
+
+- **byosh is an open DNS server.** Anyone with network access to UDP 53 on your server can use it as a DNS resolver. Use a firewall (e.g., `iptables`, `ufw`, cloud provider security groups) to restrict access to trusted clients.
+- **`--net=host` exposes all ports** — the container shares the host network stack with no isolation. Only run on a dedicated server or VM.
+- **The built-in whitelist uses suffix matching.** An entry like `.github.com` matches `api.github.com` and `github.com` but not `evilgithub.com` (domain-boundary enforced).
+- **`DNS_ALLOW_ALL=YES` disables the whitelist entirely**, proxying all domains through the server. Use with caution and only when you understand the implications.
+- **IPv6 is disabled** — the DNS server only processes IPv4 (A record) queries. AAAA queries receive no response.
 
 ## Limitation
 
