@@ -1,74 +1,162 @@
 # -*- coding: utf-8 -*-
 # vim: tabstop=4 shiftwidth=4 expandtab
-import sys, socket, argparse
-from dnslib import DNSRecord, DNSHeader, RR, A, QTYPE, DNSError
+import sys
+import socket
+import argparse
+import logging
+from ipaddress import ip_address, IPv4Address
+from dnslib import DNSRecord, DNSHeader, RR, A, QTYPE, DNSError, RCODE
 from os import environ
 from socketserver import ThreadingUDPServer, DatagramRequestHandler
 
+
+logger = logging.getLogger("byosh")
+
 allow_all = False
-w_list = []
-args = None
+whitelist = set()
+server_ip = None
+debug_enabled = False
 
 
-class PacketHandler(DatagramRequestHandler):  # DatagramRequestHandler
+def domain_in_whitelist(domain: str, whitelist_entries: set) -> bool:
+    domain = domain.rstrip(".")
+    for entry in whitelist_entries:
+        clean_entry = entry.lstrip(".")
+        if domain == clean_entry or domain.endswith("." + clean_entry):
+            return True
+    return False
+
+
+class PacketHandler(DatagramRequestHandler):
     def handle(self) -> None:
-        data = self.rfile.read(512)  # Maximum UDP Packet Size is 512 Byte
-        if args.debug:  # Show Client Address (if debug)
-            print("Accept Request from : ", self.client_address[0])
+        data = self.rfile.read(512)
+        if debug_enabled:
+            logger.info("Request from %s", self.client_address[0])
         try:
-            packet = DNSRecord.parse(data)  # Parse DNS Packet
-            for question in packet.questions:  # Iterate over questions ( however most of DNS Servers even BIND support single question)
-                requested_domain_name = question.get_qname()  # Get the requested name
-                reply_packet = packet.reply()  # Generate Reply packet
-                if (not allow_all) and (w_list != [] and (
-                not any(s[1:] in str(requested_domain_name) for s in w_list))):  # Check the Whitelist
-                    try:
-                        realip = socket.gethostbyname(requested_domain_name.idna())  # Get Real IP Address
-                    except Exception as e:
-                        if args.debug:
-                            print(e)
-                        realip = args.ip
-                    reply_packet.add_answer(
-                        RR(requested_domain_name, rdata=A(realip), ttl=60))  # Append Address to replies
-                    if args.debug:
-                        print("Request: %s --> %s" % (requested_domain_name.idna(), realip))
-                else:
-                    reply_packet.add_answer(RR(requested_domain_name, rdata=A(args.ip), ttl=60))  # Fake the address
-                    if args.debug:
-                        print("Request: %s --> %s" % (requested_domain_name.idna(), args.ip))
-                self.wfile.write(reply_packet.pack())  # send Packed UDP Response to the client
+            packet = DNSRecord.parse(data)
         except DNSError as err:
-            if args.debug:
-                print(err)
+            logger.warning("Failed to parse DNS packet from %s: %s", self.client_address[0], err)
+            reply = DNSRecord(
+                DNSHeader(id=0, qr=1, aa=0, ra=1, rcode=RCODE.SERVFAIL)
+            )
+            self.wfile.write(reply.pack())
+            return
+
+        for question in packet.questions:
+            requested_domain = question.get_qname()
+            reply_packet = packet.reply()
+            in_whitelist = allow_all or domain_in_whitelist(
+                str(requested_domain), whitelist
+            )
+            if in_whitelist:
+                reply_packet.add_answer(
+                    RR(requested_domain, rdata=A(server_ip), ttl=60)
+                )
+                if debug_enabled:
+                    logger.info(
+                        "%s --> %s (proxied)", requested_domain.idna(), server_ip
+                    )
+            else:
+                try:
+                    real_ip = socket.gethostbyname(requested_domain.idna())
+                except Exception as e:
+                    if debug_enabled:
+                        logger.warning(
+                            "DNS resolution failed for %s: %s",
+                            requested_domain.idna(),
+                            e,
+                        )
+                    real_ip = server_ip
+                reply_packet.add_answer(
+                    RR(requested_domain, rdata=A(real_ip), ttl=60)
+                )
+                if debug_enabled:
+                    logger.info(
+                        "%s --> %s (direct)", requested_domain.idna(), real_ip
+                    )
+            self.wfile.write(reply_packet.pack())
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Process input')
-    parser.add_argument("--ip", help="set listen ip address, set to ENV to get it from PUB_IP Env Variable",
-                        action="store", type=str, default="0.0.0.0")
-    parser.add_argument("--whitelist",
-                        help="Whitelisted Domain. use ALL or DNS_ALLOW_ALL=YES Env variable for access all domain",
-                        action="store", type=str, default="Empty")
+def validate_ip(value: str) -> str:
+    try:
+        addr = ip_address(value)
+        if not isinstance(addr, IPv4Address):
+            raise ValueError(f"Only IPv4 addresses are supported, got: {value}")
+        return value
+    except ValueError as e:
+        logger.error("Invalid IP address: %s", e)
+        sys.exit(1)
 
-    parser.add_argument("--port", help="set listen port", action="store", type=int, default=53)
-    parser.add_argument("--debug", help="enable debug logging", action="store_true")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="byosh DNS server")
+    parser.add_argument(
+        "--ip",
+        help="Public IP for proxied responses. Use ENV to read from PUB_IP env var",
+        action="store",
+        type=str,
+        default="0.0.0.0",
+    )
+    parser.add_argument(
+        "--whitelist",
+        help="Path to whitelist domain file",
+        action="store",
+        type=str,
+        default="Empty",
+    )
+    parser.add_argument(
+        "--port", help="Listen port", action="store", type=int, default=53
+    )
+    parser.add_argument(
+        "--debug", help="Enable debug logging", action="store_true"
+    )
     args = parser.parse_args()
 
-    if str(args.ip).upper() == "ENV":
-        args.ip = environ.get("PUB_IP")
+    debug_enabled = args.debug
+    logging.basicConfig(
+        level=logging.DEBUG if debug_enabled else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
 
-    if args.debug:
-        print('IP: %s Port: %s' % (args.ip, args.port))
+    raw_ip = args.ip
+    if str(raw_ip).upper() == "ENV":
+        raw_ip = environ.get("PUB_IP")
+        if not raw_ip:
+            logger.error(
+                "PUB_IP environment variable is not set. "
+                "Set it to your server's public IP address."
+            )
+            sys.exit(1)
+
+    server_ip = validate_ip(raw_ip)
+
+    logger.info("Starting byosh DNS server on 0.0.0.0:%d (PUB_IP=%s)", args.port, server_ip)
 
     if environ.get("DNS_ALLOW_ALL") == "YES" or args.whitelist == "ALL":
         allow_all = True
+        logger.info("DNS_ALLOW_ALL enabled — proxying all domains")
     else:
-        if args.whitelist != "Empty":
+        allow_all = False
+        if args.whitelist not in ("Empty", ""):
             with open(args.whitelist) as f:
-                w_list.extend(f.read().splitlines())
+                for line in f:
+                    stripped = line.strip()
+                    if stripped:
+                        whitelist.add(stripped)
+            logger.info("Loaded %d entries from whitelist", len(whitelist))
+
     try:
         udp_sock = ThreadingUDPServer(("0.0.0.0", args.port), PacketHandler)
+        logger.info("Listening on UDP 0.0.0.0:%d", args.port)
         udp_sock.serve_forever()
+    except PermissionError:
+        logger.error(
+            "Permission denied — cannot bind to port %d. "
+            "Run as root or use a port above 1024.",
+            args.port,
+        )
+        sys.exit(1)
     except KeyboardInterrupt:
-        if args.debug:
-            print("done.")
+        logger.info("Shutting down")
