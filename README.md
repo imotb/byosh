@@ -19,7 +19,7 @@ Since Security and Privacy audits have no place in Iran, and `Shecan` obviously 
 - make sure ports 80, 443 and 53 are not used in your system (disable `systemd-resolved` first: `systemctl disable --now systemd-resolved`)
 - run the command in your server (remember to replace YOUR_PUBLIC_IP with you public facing IP address)
 
-`docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP --name some-byosh mosajjal/byosh:latest`
+`docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP --name some-byosh imotb/byosh:latest`
 
 # FAQ
 
@@ -44,7 +44,7 @@ Sure! do the following
 
 run the following command (not tested):
 
-`docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP -e DNS_ALLOW_ALL=YES --name some-byosh mosajjal/byosh:latest`
+`docker run -d -p 53:53/udp -p 443:443 -p 80:80 --net=host -e PUB_IP=YOUR_PUBLIC_IP -e DNS_ALLOW_ALL=YES --name some-byosh imotb/byosh:latest`
 
 NOTE: you still have to provide a list file, albiet an empty one. It'll get ignored once the service is started
 
